@@ -17,6 +17,9 @@ import {
   Loader2,
   BookOpen,
   MapPin,
+  Upload,
+  FileUp,
+  CheckCircle2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -58,7 +61,17 @@ const KnowledgeBaseManager = ({ api }) => {
   const [docs, setDocs] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isFormOpen, setFormOpen] = useState(false);
+  const [isUploadOpen, setUploadOpen] = useState(false);
   const [isSaving, setSaving] = useState(false);
+  const [isUploading, setUploading] = useState(false);
+  const [uploadResult, setUploadResult] = useState(null);
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [uploadMeta, setUploadMeta] = useState({
+    kategori: 'Regulasi Umum',
+    sumber_nama: '',
+    sumber_link: '',
+    pasal_rujukan: '',
+  });
   const [form, setForm] = useState({
     topik: '',
     judul: '',
@@ -121,6 +134,50 @@ const KnowledgeBaseManager = ({ api }) => {
     }
   };
 
+  const handleFileUpload = async (e) => {
+    e.preventDefault();
+    if (!selectedFile) {
+      toast.error('Pilih file PDF atau DOCX terlebih dulu');
+      return;
+    }
+    const ext = selectedFile.name.split('.').pop().toLowerCase();
+    if (!['pdf', 'docx'].includes(ext)) {
+      toast.error('Format tidak didukung. Hanya PDF atau DOCX.');
+      return;
+    }
+    setUploading(true);
+    setUploadResult(null);
+    try {
+      const fd = new FormData();
+      fd.append('file', selectedFile);
+      fd.append('kategori', uploadMeta.kategori);
+      fd.append('sumber_nama', uploadMeta.sumber_nama || selectedFile.name);
+      fd.append('sumber_link', uploadMeta.sumber_link || '#');
+      fd.append('pasal_rujukan', uploadMeta.pasal_rujukan || '');
+      fd.append('target_chunk_size', '800');
+
+      const res = await axios.post(`${api}/kur-docs/upload`, fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      setUploadResult(res.data);
+      toast.success(`Berhasil! ${res.data.chunks_created} chunk masuk knowledge base`, {
+        description: `Total ${res.data.total_chars.toLocaleString('id-ID')} karakter dari ${res.data.filename}`,
+      });
+      fetchDocs();
+    } catch (err) {
+      const msg = err.response?.data?.detail || 'Gagal mengunggah file';
+      toast.error(msg);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const resetUploadForm = () => {
+    setSelectedFile(null);
+    setUploadResult(null);
+    setUploadMeta({ kategori: 'Regulasi Umum', sumber_nama: '', sumber_link: '', pasal_rujukan: '' });
+  };
+
   const kategoriOptions = [
     'Regulasi Umum',
     'Suku Bunga & Angsuran',
@@ -148,14 +205,25 @@ const KnowledgeBaseManager = ({ api }) => {
             Setiap dokumen di sini akan dipakai oleh asisten AI (RAG pipeline) untuk menjawab pertanyaan petani. Rekomendasi: tambahkan sumber resmi OJK, Kementan, Bank Himbara.
           </p>
         </div>
-        <Button
-          data-testid={KB.addDocBtn}
-          onClick={() => setFormOpen(true)}
-          className="bg-emerald-800 hover:bg-emerald-900 text-white h-10 px-4 text-xs font-semibold shadow-sm"
-        >
-          <Plus className="w-4 h-4 mr-1.5" />
-          Tambah Dokumen Knowledge Base
-        </Button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <Button
+            data-testid={KB.addDocBtn}
+            onClick={() => setFormOpen(true)}
+            variant="outline"
+            className="bg-white border-emerald-300 text-emerald-800 hover:bg-emerald-50 h-10 px-4 text-xs font-semibold shadow-sm"
+          >
+            <Plus className="w-4 h-4 mr-1.5" />
+            Tambah Manual
+          </Button>
+          <Button
+            data-testid={KB.uploadFileBtn}
+            onClick={() => setUploadOpen(true)}
+            className="bg-emerald-800 hover:bg-emerald-900 text-white h-10 px-4 text-xs font-semibold shadow-sm"
+          >
+            <FileUp className="w-4 h-4 mr-1.5" />
+            Upload PDF / DOCX
+          </Button>
+        </div>
       </div>
 
       {/* Stats */}
@@ -376,6 +444,166 @@ const KnowledgeBaseManager = ({ api }) => {
           </form>
         </DialogContent>
       </Dialog>
+
+      {/* Upload PDF/DOCX Modal */}
+      <Dialog open={isUploadOpen} onOpenChange={(open) => { setUploadOpen(open); if (!open) resetUploadForm(); }}>
+        <DialogContent className="max-w-lg bg-white p-6 rounded-2xl border border-stone-200 shadow-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader className="text-left space-y-1">
+            <div className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-emerald-800 bg-emerald-100 px-2.5 py-1 rounded-full w-fit">
+              <Upload className="w-3.5 h-3.5" />
+              Batch Ingest PDF / DOCX
+            </div>
+            <DialogTitle className="text-lg font-heading font-bold text-stone-900">
+              Unggah Dokumen ke Knowledge Base RAG
+            </DialogTitle>
+            <p className="text-xs text-stone-500">
+              Backend akan otomatis mengekstrak teks, memecah menjadi chunk ~800 karakter, dan menyimpannya sebagai entry knowledge base yang siap dipakai chatbot AI.
+            </p>
+          </DialogHeader>
+
+          <form onSubmit={handleFileUpload} className="space-y-3 mt-3">
+            {/* File Dropzone */}
+            <div>
+              <Label className="text-xs text-stone-700">File PDF / DOCX <span className="text-red-600">*</span></Label>
+              <label
+                htmlFor="kb-file-input"
+                className={`mt-1 flex flex-col items-center justify-center gap-1.5 p-6 rounded-xl border-2 border-dashed cursor-pointer transition-all ${
+                  selectedFile
+                    ? 'border-emerald-500 bg-emerald-50/40'
+                    : 'border-stone-300 hover:border-emerald-600 hover:bg-emerald-50/30'
+                }`}
+              >
+                {selectedFile ? (
+                  <>
+                    <CheckCircle2 className="w-6 h-6 text-emerald-700" />
+                    <div className="text-xs font-semibold text-emerald-900 text-center break-all">
+                      {selectedFile.name}
+                    </div>
+                    <div className="text-[11px] text-stone-500">
+                      {(selectedFile.size / 1024).toFixed(1)} KB • Klik untuk ganti file
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <FileUp className="w-6 h-6 text-emerald-700" />
+                    <div className="text-xs font-semibold text-stone-800">
+                      Klik untuk pilih file PDF atau DOCX
+                    </div>
+                    <div className="text-[11px] text-stone-500">
+                      Ukuran ideal: &lt; 10 MB
+                    </div>
+                  </>
+                )}
+              </label>
+              <input
+                id="kb-file-input"
+                type="file"
+                accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                data-testid={KB.uploadFileInput}
+                onChange={(e) => { setSelectedFile(e.target.files?.[0] || null); setUploadResult(null); }}
+                className="hidden"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <Label className="text-xs text-stone-700">Kategori</Label>
+                <Select
+                  value={uploadMeta.kategori}
+                  onValueChange={(v) => setUploadMeta({ ...uploadMeta, kategori: v })}
+                >
+                  <SelectTrigger data-testid={KB.uploadKategori} className="mt-1 text-xs h-9">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {kategoriOptions.map((k) => (
+                      <SelectItem key={k} value={k}>{k}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label className="text-xs text-stone-700">Pasal / Bab Ringkas</Label>
+                <Input
+                  value={uploadMeta.pasal_rujukan}
+                  onChange={(e) => setUploadMeta({ ...uploadMeta, pasal_rujukan: e.target.value })}
+                  placeholder="Pasal 3 / Bab II"
+                  className="mt-1 text-xs h-9"
+                />
+              </div>
+            </div>
+
+            <div>
+              <Label className="text-xs text-stone-700">Nama Sumber (opsional)</Label>
+              <Input
+                data-testid={KB.uploadSumberNama}
+                value={uploadMeta.sumber_nama}
+                onChange={(e) => setUploadMeta({ ...uploadMeta, sumber_nama: e.target.value })}
+                placeholder="Kosongkan agar memakai nama file otomatis"
+                className="mt-1 text-xs h-9"
+              />
+            </div>
+
+            <div>
+              <Label className="text-xs text-stone-700">Link Sumber (opsional)</Label>
+              <Input
+                data-testid={KB.uploadSumberLink}
+                value={uploadMeta.sumber_link}
+                onChange={(e) => setUploadMeta({ ...uploadMeta, sumber_link: e.target.value })}
+                placeholder="https://ojk.go.id/..."
+                className="mt-1 text-xs h-9"
+              />
+            </div>
+
+            {uploadResult && (
+              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 space-y-1.5">
+                <div className="flex items-center gap-1.5 font-bold">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-700" />
+                  Ekstraksi Berhasil
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-[11px]">
+                  <div><strong>File:</strong> {uploadResult.filename}</div>
+                  <div><strong>Format:</strong> {uploadResult.file_type?.toUpperCase()}</div>
+                  <div><strong>Chunk dibuat:</strong> {uploadResult.chunks_created}</div>
+                  <div><strong>Total karakter:</strong> {uploadResult.total_chars?.toLocaleString('id-ID')}</div>
+                </div>
+                {uploadResult.preview_first_chunk && (
+                  <div className="pt-1.5 mt-1.5 border-t border-emerald-200">
+                    <div className="text-[10px] font-semibold uppercase text-emerald-700 mb-0.5">Preview chunk pertama:</div>
+                    <div className="text-[11px] text-emerald-900/90 italic leading-snug">
+                      "{uploadResult.preview_first_chunk}"
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="flex items-center gap-2 pt-1">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => { setUploadOpen(false); resetUploadForm(); }}
+                className="flex-1 text-xs h-10 border-stone-300"
+              >
+                Tutup
+              </Button>
+              <Button
+                type="submit"
+                data-testid={KB.uploadSubmitBtn}
+                disabled={isUploading || !selectedFile}
+                className="flex-1 bg-emerald-800 hover:bg-emerald-900 text-white text-xs h-10 font-semibold shadow-sm"
+              >
+                {isUploading ? (
+                  <><Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> Mengekstrak...</>
+                ) : (
+                  <><Upload className="w-4 h-4 mr-1.5" /> Ekstrak & Simpan Chunk</>
+                )}
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
+
     </div>
   );
 };

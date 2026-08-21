@@ -67,6 +67,12 @@ export const ADD_FARMER = {
 export const KB = {
   tableRow: (id) => `kb-doc-row-${id}`,
   addDocBtn: 'kb-add-doc-btn',
+  uploadFileBtn: 'kb-upload-file-btn',
+  uploadFileInput: 'kb-upload-file-input',
+  uploadKategori: 'kb-upload-kategori',
+  uploadSumberNama: 'kb-upload-sumber-nama',
+  uploadSumberLink: 'kb-upload-sumber-link',
+  uploadSubmitBtn: 'kb-upload-submit-btn',
   formTopik: 'kb-form-topik',
   formJudul: 'kb-form-judul',
   formKategori: 'kb-form-kategori',

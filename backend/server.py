@@ -1,8 +1,9 @@
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
+import io
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
@@ -13,6 +14,18 @@ import re
 from datetime import datetime, timezone
 from fastapi.responses import StreamingResponse
 import json
+
+try:
+    from pypdf import PdfReader
+    HAS_PDF = True
+except Exception:
+    HAS_PDF = False
+
+try:
+    from docx import Document as DocxDocument
+    HAS_DOCX = True
+except Exception:
+    HAS_DOCX = False
 
 
 ROOT_DIR = Path(__file__).parent
@@ -628,6 +641,128 @@ async def create_kur_doc(doc: KurDocCreate):
 async def delete_kur_doc(doc_id: str):
     result = await db.kur_documents.delete_one({"id": doc_id})
     return {"success": result.deleted_count > 0}
+
+
+def _extract_text_from_pdf(file_bytes: bytes) -> str:
+    if not HAS_PDF:
+        raise HTTPException(status_code=500, detail="Library pypdf tidak terpasang di server")
+    reader = PdfReader(io.BytesIO(file_bytes))
+    parts = []
+    for page in reader.pages:
+        try:
+            txt = page.extract_text() or ""
+            if txt.strip():
+                parts.append(txt.strip())
+        except Exception:
+            continue
+    return "\n\n".join(parts)
+
+
+def _extract_text_from_docx(file_bytes: bytes) -> str:
+    if not HAS_DOCX:
+        raise HTTPException(status_code=500, detail="Library python-docx tidak terpasang di server")
+    doc = DocxDocument(io.BytesIO(file_bytes))
+    parts = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+    # also include table cells
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                if cell.text.strip():
+                    parts.append(cell.text.strip())
+    return "\n\n".join(parts)
+
+
+def _chunk_text(text: str, target_size: int = 800, overlap: int = 120) -> List[str]:
+    # Normalize whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    if not text:
+        return []
+    if len(text) <= target_size:
+        return [text]
+
+    # Split by sentences first, then pack into ~target_size chunks
+    sentences = re.split(r'(?<=[\.\?\!])\s+', text)
+    chunks = []
+    current = ""
+    for sent in sentences:
+        if len(current) + len(sent) + 1 <= target_size:
+            current = (current + " " + sent).strip() if current else sent
+        else:
+            if current:
+                chunks.append(current)
+            # Add overlap tail of previous chunk into new one for RAG continuity
+            tail = current[-overlap:] if current and overlap > 0 else ""
+            current = (tail + " " + sent).strip() if tail else sent
+            # If single sentence is longer than target_size, hard-split it
+            while len(current) > target_size * 1.5:
+                chunks.append(current[:target_size])
+                current = current[target_size - overlap:]
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+@api_router.post("/kur-docs/upload")
+async def upload_kur_doc_file(
+    file: UploadFile = File(...),
+    kategori: str = Form("Regulasi Umum"),
+    sumber_nama: str = Form(""),
+    sumber_link: str = Form("#"),
+    pasal_rujukan: str = Form(""),
+    target_chunk_size: int = Form(800),
+):
+    filename = file.filename or "uploaded.pdf"
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext not in {"pdf", "docx"}:
+        raise HTTPException(status_code=400, detail="Format tidak didukung. Gunakan PDF atau DOCX.")
+
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="File kosong")
+
+    if ext == "pdf":
+        raw_text = _extract_text_from_pdf(contents)
+    else:
+        raw_text = _extract_text_from_docx(contents)
+
+    if not raw_text.strip():
+        raise HTTPException(status_code=400, detail="Tidak ada teks yang bisa diekstrak dari file ini")
+
+    chunks = _chunk_text(raw_text, target_size=max(300, min(2000, target_chunk_size)))
+    if not chunks:
+        raise HTTPException(status_code=400, detail="Ekstraksi menghasilkan 0 chunk")
+
+    base_title = filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ").strip().title()
+    sumber = sumber_nama or f"Dokumen Unggahan: {filename}"
+
+    inserted = []
+    for idx, chunk in enumerate(chunks, start=1):
+        entry = {
+            "id": f"doc-{uuid.uuid4().hex[:8]}",
+            "topik": f"{base_title} — Bagian {idx}/{len(chunks)}",
+            "judul": f"{base_title} (Bagian {idx})",
+            "kategori": kategori or "Regulasi Umum",
+            "isi_teks": chunk,
+            "sumber_nama": sumber,
+            "sumber_link": sumber_link or "#",
+            "pasal_rujukan": pasal_rujukan or f"Halaman {idx}",
+            "uploaded_at": datetime.now(timezone.utc).isoformat(),
+            "source_file": filename,
+        }
+        inserted.append(entry)
+
+    if inserted:
+        await db.kur_documents.insert_many([e.copy() for e in inserted])
+
+    return {
+        "success": True,
+        "filename": filename,
+        "file_type": ext,
+        "chunks_created": len(inserted),
+        "total_chars": sum(len(e["isi_teks"]) for e in inserted),
+        "doc_ids": [e["id"] for e in inserted],
+        "preview_first_chunk": inserted[0]["isi_teks"][:250] + ("..." if len(inserted[0]["isi_teks"]) > 250 else "") if inserted else "",
+    }
 
 
 # 6. RAG AI KUR Advisory Chat
