@@ -27,6 +27,23 @@ try:
 except Exception:
     HAS_DOCX = False
 
+# Qdrant + FastEmbed RAG engine (self-hosted, embedded)
+try:
+    from rag_engine import (
+        semantic_chunk as rag_semantic_chunk,
+        upsert_docs as rag_upsert,
+        delete_doc as rag_delete,
+        clear_collection as rag_clear,
+        search as rag_search,
+        is_ready as rag_is_ready,
+        status as rag_status,
+        count_points as rag_count,
+    )
+    HAS_RAG = True
+except Exception as _rag_err:
+    logging.warning(f"rag_engine not available: {_rag_err}")
+    HAS_RAG = False
+
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -316,15 +333,24 @@ def calculate_farmer_credit_score(profile: dict, completed_modules_count: int, a
 # RAG RETRIEVAL ENGINE
 # ----------------------------------------------------
 async def retrieve_relevant_kur_docs(query: str, top_k: int = 3) -> List[dict]:
-    docs = await db.kur_documents.find({}, {"_id": 0}).to_list(100)
+    # 1) Try Qdrant semantic search first
+    if HAS_RAG and rag_is_ready():
+        try:
+            hits = rag_search(query, top_k=top_k)
+            if hits:
+                # Normalize: strip internal fields
+                cleaned = []
+                for h in hits:
+                    cleaned.append({k: v for k, v in h.items() if not k.startswith("_")})
+                return cleaned
+        except Exception as e:
+            logging.warning(f"Qdrant retrieval failed, falling back to keyword: {e}")
+
+    # 2) Fallback: keyword-weighted retrieval over mongo
+    docs = await db.kur_documents.find({}, {"_id": 0}).to_list(200)
     if not docs:
         return []
-    
-    # Tokenize and score query terms
     query_tokens = set(re.findall(r'\w+', query.lower()))
-    scored_docs = []
-    
-    # Priority keywords
     keywords_weight = {
         "syarat": 3, "dokumen": 3, "ktp": 3, "sku": 3, "nib": 3,
         "bunga": 3, "persen": 2, "6%": 4, "3%": 4, "agunan": 3, "jaminan": 3,
@@ -332,18 +358,17 @@ async def retrieve_relevant_kur_docs(query: str, top_k: int = 3) -> List[dict]:
         "tahapan": 2, "alur": 2, "bri": 2, "mandiri": 2, "bni": 2, "bsi": 2,
         "yarnen": 4, "panen": 2, "angsuran": 2, "survei": 2, "mantri": 2
     }
-    
+    scored = []
     for doc in docs:
-        doc_text = f"{doc.get('topik', '')} {doc.get('judul', '')} {doc.get('isi_teks', '')}".lower()
+        text = f"{doc.get('topik', '')} {doc.get('judul', '')} {doc.get('isi_teks', '')}".lower()
         score = 0.0
         for token in query_tokens:
-            if token in doc_text:
+            if token in text:
                 weight = keywords_weight.get(token, 1.0)
-                score += weight * (doc_text.count(token) + 1)
-        scored_docs.append((score, doc))
-        
-    scored_docs.sort(key=lambda x: x[0], reverse=True)
-    return [doc for score, doc in scored_docs[:top_k]]
+                score += weight * (text.count(token) + 1)
+        scored.append((score, doc))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [d for _, d in scored[:top_k]]
 
 
 async def generate_rag_answer(query: str, relevant_docs: List[dict]) -> tuple[str, List[str], List[Dict[str, str]]]:
@@ -635,12 +660,33 @@ async def create_kur_doc(doc: KurDocCreate):
         "pasal_rujukan": doc.pasal_rujukan or "Ketentuan Resmi",
     }
     await db.kur_documents.insert_one(new_doc.copy())
+    if HAS_RAG:
+        rag_upsert([new_doc])
     return {"success": True, "doc": new_doc}
 
 @api_router.delete("/kur-docs/{doc_id}")
 async def delete_kur_doc(doc_id: str):
     result = await db.kur_documents.delete_one({"id": doc_id})
+    if HAS_RAG:
+        rag_delete(doc_id)
     return {"success": result.deleted_count > 0}
+
+
+@api_router.get("/rag/status")
+async def get_rag_status():
+    if not HAS_RAG:
+        return {"available": False, "reason": "rag_engine not installed"}
+    return {"available": True, **rag_status(), "points_in_qdrant": rag_count()}
+
+
+@api_router.post("/rag/reindex")
+async def reindex_rag():
+    if not HAS_RAG:
+        return {"success": False, "reason": "rag_engine not installed"}
+    docs = await db.kur_documents.find({}, {"_id": 0}).to_list(1000)
+    rag_clear()
+    n = rag_upsert(docs)
+    return {"success": True, "docs_indexed": n, "mongo_source_count": len(docs)}
 
 
 def _extract_text_from_pdf(file_bytes: bytes) -> str:
@@ -728,7 +774,11 @@ async def upload_kur_doc_file(
     if not raw_text.strip():
         raise HTTPException(status_code=400, detail="Tidak ada teks yang bisa diekstrak dari file ini")
 
-    chunks = _chunk_text(raw_text, target_size=max(300, min(2000, target_chunk_size)))
+    # Prefer semantic chunking via Qdrant/SemanticChunker; fallback to naive
+    if HAS_RAG:
+        chunks = rag_semantic_chunk(raw_text)
+    else:
+        chunks = _chunk_text(raw_text, target_size=max(300, min(2000, target_chunk_size)))
     if not chunks:
         raise HTTPException(status_code=400, detail="Ekstraksi menghasilkan 0 chunk")
 
@@ -753,12 +803,17 @@ async def upload_kur_doc_file(
 
     if inserted:
         await db.kur_documents.insert_many([e.copy() for e in inserted])
+    indexed = 0
+    if HAS_RAG and inserted:
+        indexed = rag_upsert(inserted)
 
     return {
         "success": True,
         "filename": filename,
         "file_type": ext,
         "chunks_created": len(inserted),
+        "vectors_indexed": indexed if HAS_RAG else 0,
+        "used_semantic_chunker": HAS_RAG,
         "total_chars": sum(len(e["isi_teks"]) for e in inserted),
         "doc_ids": [e["id"] for e in inserted],
         "preview_first_chunk": inserted[0]["isi_teks"][:250] + ("..." if len(inserted[0]["isi_teks"]) > 250 else "") if inserted else "",
@@ -1605,3 +1660,12 @@ async def seed_all_data():
     ]
     await db.learning_progress.insert_many(demo_progress)
     logger.info("ModalTani seeding completed successfully.")
+
+    # Sync knowledge base into Qdrant vector store
+    if HAS_RAG:
+        try:
+            rag_clear()
+            n = rag_upsert(kur_kb)
+            logger.info(f"[RAG] seeded Qdrant with {n} points")
+        except Exception as e:
+            logger.warning(f"[RAG] Qdrant seed skipped: {e}")

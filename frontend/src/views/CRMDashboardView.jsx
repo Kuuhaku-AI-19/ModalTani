@@ -63,9 +63,9 @@ const KnowledgeBaseManager = ({ api }) => {
   const [isFormOpen, setFormOpen] = useState(false);
   const [isUploadOpen, setUploadOpen] = useState(false);
   const [isSaving, setSaving] = useState(false);
-  const [isUploading, setUploading] = useState(false);
-  const [uploadResult, setUploadResult] = useState(null);
-  const [selectedFile, setSelectedFile] = useState(null);
+  const [ragStatus, setRagStatus] = useState(null);
+  const [uploadQueue, setUploadQueue] = useState([]); // {id, file, status, progress, result, error}
+  const [isBulkRunning, setBulkRunning] = useState(false);
   const [uploadMeta, setUploadMeta] = useState({
     kategori: 'Regulasi Umum',
     sumber_nama: '',
@@ -94,7 +94,14 @@ const KnowledgeBaseManager = ({ api }) => {
     }
   }, [api]);
 
-  useEffect(() => { fetchDocs(); }, [fetchDocs]);
+  const fetchRagStatus = useCallback(async () => {
+    try {
+      const res = await axios.get(`${api}/rag/status`);
+      setRagStatus(res.data);
+    } catch { /* ignore */ }
+  }, [api]);
+
+  useEffect(() => { fetchDocs(); fetchRagStatus(); }, [fetchDocs, fetchRagStatus]);
 
   const resetForm = () => setForm({
     topik: '', judul: '', kategori: 'Regulasi Umum',
@@ -134,47 +141,99 @@ const KnowledgeBaseManager = ({ api }) => {
     }
   };
 
-  const handleFileUpload = async (e) => {
-    e.preventDefault();
-    if (!selectedFile) {
-      toast.error('Pilih file PDF atau DOCX terlebih dulu');
-      return;
+  const handleFilesSelected = (fileList) => {
+    const arr = Array.from(fileList || []);
+    const valid = arr.filter(f => {
+      const ext = f.name.split('.').pop().toLowerCase();
+      return ['pdf', 'docx'].includes(ext);
+    });
+    const rejected = arr.length - valid.length;
+    if (rejected > 0) {
+      toast.error(`${rejected} file dilewati (bukan PDF/DOCX)`);
     }
-    const ext = selectedFile.name.split('.').pop().toLowerCase();
-    if (!['pdf', 'docx'].includes(ext)) {
-      toast.error('Format tidak didukung. Hanya PDF atau DOCX.');
-      return;
-    }
-    setUploading(true);
-    setUploadResult(null);
+    const queued = valid.map(f => ({
+      id: `${f.name}-${f.size}-${f.lastModified}-${Math.random().toString(36).slice(2, 6)}`,
+      file: f,
+      status: 'queued',   // queued | uploading | success | failed
+      progress: 0,
+      result: null,
+      error: null,
+    }));
+    setUploadQueue(prev => [...prev, ...queued]);
+  };
+
+  const removeFromQueue = (id) => {
+    setUploadQueue(prev => prev.filter(x => x.id !== id));
+  };
+
+  const updateQueueItem = (id, patch) => {
+    setUploadQueue(prev => prev.map(x => x.id === id ? { ...x, ...patch } : x));
+  };
+
+  const uploadOneFile = async (item) => {
+    updateQueueItem(item.id, { status: 'uploading', progress: 0, error: null });
     try {
       const fd = new FormData();
-      fd.append('file', selectedFile);
+      fd.append('file', item.file);
       fd.append('kategori', uploadMeta.kategori);
-      fd.append('sumber_nama', uploadMeta.sumber_nama || selectedFile.name);
+      fd.append('sumber_nama', uploadMeta.sumber_nama || item.file.name);
       fd.append('sumber_link', uploadMeta.sumber_link || '#');
       fd.append('pasal_rujukan', uploadMeta.pasal_rujukan || '');
       fd.append('target_chunk_size', '800');
 
       const res = await axios.post(`${api}/kur-docs/upload`, fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (evt) => {
+          if (evt.total) {
+            const pct = Math.min(95, Math.round((evt.loaded / evt.total) * 90));
+            updateQueueItem(item.id, { progress: pct });
+          }
+        },
       });
-      setUploadResult(res.data);
-      toast.success(`Berhasil! ${res.data.chunks_created} chunk masuk knowledge base`, {
-        description: `Total ${res.data.total_chars.toLocaleString('id-ID')} karakter dari ${res.data.filename}`,
-      });
-      fetchDocs();
+      updateQueueItem(item.id, { status: 'success', progress: 100, result: res.data });
+      return true;
     } catch (err) {
-      const msg = err.response?.data?.detail || 'Gagal mengunggah file';
-      toast.error(msg);
-    } finally {
-      setUploading(false);
+      const msg = err.response?.data?.detail || err.message || 'Upload gagal';
+      updateQueueItem(item.id, { status: 'failed', error: msg });
+      return false;
     }
   };
 
+  const startBulkUpload = async () => {
+    const pending = uploadQueue.filter(x => x.status === 'queued' || x.status === 'failed');
+    if (pending.length === 0) {
+      toast.info('Tidak ada file di antrian');
+      return;
+    }
+    setBulkRunning(true);
+    let ok = 0, fail = 0;
+    for (const item of pending) {
+      const currentSnapshot = uploadQueue.find(x => x.id === item.id) || item;
+      const success = await uploadOneFile(currentSnapshot);
+      if (success) ok++; else fail++;
+    }
+    setBulkRunning(false);
+    toast.success(`Bulk ingest selesai: ${ok} sukses, ${fail} gagal`, {
+      description: 'Knowledge base RAG sudah diperbarui.',
+    });
+    fetchDocs();
+    fetchRagStatus();
+  };
+
+  const retryOne = async (id) => {
+    const item = uploadQueue.find(x => x.id === id);
+    if (!item) return;
+    await uploadOneFile(item);
+    fetchDocs();
+    fetchRagStatus();
+  };
+
+  const clearFinished = () => {
+    setUploadQueue(prev => prev.filter(x => x.status !== 'success'));
+  };
+
   const resetUploadForm = () => {
-    setSelectedFile(null);
-    setUploadResult(null);
+    setUploadQueue([]);
     setUploadMeta({ kategori: 'Regulasi Umum', sumber_nama: '', sumber_link: '', pasal_rujukan: '' });
   };
 
@@ -245,10 +304,19 @@ const KnowledgeBaseManager = ({ api }) => {
           </div>
         </div>
         <div className="p-4 rounded-xl bg-white border border-stone-200">
-          <div className="text-[11px] uppercase font-semibold text-stone-500">RAG Coverage</div>
-          <div className="text-sm font-heading font-bold text-emerald-800 mt-1 flex items-center gap-1">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            Aktif Online
+          <div className="text-[11px] uppercase font-semibold text-stone-500">Qdrant Vectors</div>
+          <div className="text-2xl font-heading font-bold text-emerald-800 mt-1 flex items-center gap-1.5">
+            {ragStatus?.available && ragStatus?.ready ? (
+              <>
+                {ragStatus?.points_in_qdrant ?? 0}
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              </>
+            ) : (
+              <span className="text-sm text-amber-700">Init...</span>
+            )}
+          </div>
+          <div className="text-[10px] text-stone-500 mt-0.5 truncate" title={ragStatus?.embed_model}>
+            {ragStatus?.embed_model?.split('/').pop() || 'no model'}
           </div>
         </div>
       </div>
@@ -445,136 +513,203 @@ const KnowledgeBaseManager = ({ api }) => {
         </DialogContent>
       </Dialog>
 
-      {/* Upload PDF/DOCX Modal */}
+      {/* Bulk Upload PDF/DOCX Modal */}
       <Dialog open={isUploadOpen} onOpenChange={(open) => { setUploadOpen(open); if (!open) resetUploadForm(); }}>
-        <DialogContent className="max-w-lg bg-white p-6 rounded-2xl border border-stone-200 shadow-2xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-2xl bg-white p-6 rounded-2xl border border-stone-200 shadow-2xl max-h-[92vh] overflow-y-auto">
           <DialogHeader className="text-left space-y-1">
             <div className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-emerald-800 bg-emerald-100 px-2.5 py-1 rounded-full w-fit">
               <Upload className="w-3.5 h-3.5" />
-              Batch Ingest PDF / DOCX
+              Bulk Ingest PDF / DOCX → Qdrant + SemanticChunker
             </div>
             <DialogTitle className="text-lg font-heading font-bold text-stone-900">
-              Unggah Dokumen ke Knowledge Base RAG
+              Unggah Banyak Dokumen ke Knowledge Base
             </DialogTitle>
             <p className="text-xs text-stone-500">
-              Backend akan otomatis mengekstrak teks, memecah menjadi chunk ~800 karakter, dan menyimpannya sebagai entry knowledge base yang siap dipakai chatbot AI.
+              Pilih beberapa file sekaligus. Backend akan mengekstrak teks, memecah dengan <strong>SemanticChunker</strong> (langchain), meng-embed dengan <strong>FastEmbed multilingual</strong>, dan menyimpan vektor di <strong>Qdrant</strong> self-hosted.
             </p>
           </DialogHeader>
 
-          <form onSubmit={handleFileUpload} className="space-y-3 mt-3">
-            {/* File Dropzone */}
-            <div>
-              <Label className="text-xs text-stone-700">File PDF / DOCX <span className="text-red-600">*</span></Label>
-              <label
-                htmlFor="kb-file-input"
-                className={`mt-1 flex flex-col items-center justify-center gap-1.5 p-6 rounded-xl border-2 border-dashed cursor-pointer transition-all ${
-                  selectedFile
-                    ? 'border-emerald-500 bg-emerald-50/40'
-                    : 'border-stone-300 hover:border-emerald-600 hover:bg-emerald-50/30'
-                }`}
-              >
-                {selectedFile ? (
-                  <>
-                    <CheckCircle2 className="w-6 h-6 text-emerald-700" />
-                    <div className="text-xs font-semibold text-emerald-900 text-center break-all">
-                      {selectedFile.name}
-                    </div>
-                    <div className="text-[11px] text-stone-500">
-                      {(selectedFile.size / 1024).toFixed(1)} KB • Klik untuk ganti file
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <FileUp className="w-6 h-6 text-emerald-700" />
-                    <div className="text-xs font-semibold text-stone-800">
-                      Klik untuk pilih file PDF atau DOCX
-                    </div>
-                    <div className="text-[11px] text-stone-500">
-                      Ukuran ideal: &lt; 10 MB
-                    </div>
-                  </>
-                )}
-              </label>
-              <input
-                id="kb-file-input"
-                type="file"
-                accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                data-testid={KB.uploadFileInput}
-                onChange={(e) => { setSelectedFile(e.target.files?.[0] || null); setUploadResult(null); }}
-                className="hidden"
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <Label className="text-xs text-stone-700">Kategori</Label>
-                <Select
-                  value={uploadMeta.kategori}
-                  onValueChange={(v) => setUploadMeta({ ...uploadMeta, kategori: v })}
-                >
-                  <SelectTrigger data-testid={KB.uploadKategori} className="mt-1 text-xs h-9">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {kategoriOptions.map((k) => (
-                      <SelectItem key={k} value={k}>{k}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+          <div className="space-y-3 mt-3">
+            {/* Metadata for ALL files in this batch */}
+            <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 space-y-2">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-stone-600">
+                Metadata untuk seluruh batch (opsional)
               </div>
-              <div>
-                <Label className="text-xs text-stone-700">Pasal / Bab Ringkas</Label>
-                <Input
-                  value={uploadMeta.pasal_rujukan}
-                  onChange={(e) => setUploadMeta({ ...uploadMeta, pasal_rujukan: e.target.value })}
-                  placeholder="Pasal 3 / Bab II"
-                  className="mt-1 text-xs h-9"
-                />
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <Label className="text-xs text-stone-700">Kategori</Label>
+                  <Select
+                    value={uploadMeta.kategori}
+                    onValueChange={(v) => setUploadMeta({ ...uploadMeta, kategori: v })}
+                  >
+                    <SelectTrigger data-testid={KB.uploadKategori} className="mt-1 text-xs h-9 bg-white">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {kategoriOptions.map((k) => (
+                        <SelectItem key={k} value={k}>{k}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label className="text-xs text-stone-700">Pasal / Bab</Label>
+                  <Input
+                    value={uploadMeta.pasal_rujukan}
+                    onChange={(e) => setUploadMeta({ ...uploadMeta, pasal_rujukan: e.target.value })}
+                    placeholder="Kosongkan → auto per halaman"
+                    className="mt-1 text-xs h-9 bg-white"
+                  />
+                </div>
+                <div>
+                  <Label className="text-xs text-stone-700">Nama Sumber</Label>
+                  <Input
+                    data-testid={KB.uploadSumberNama}
+                    value={uploadMeta.sumber_nama}
+                    onChange={(e) => setUploadMeta({ ...uploadMeta, sumber_nama: e.target.value })}
+                    placeholder="Kosong → pakai nama file"
+                    className="mt-1 text-xs h-9 bg-white"
+                  />
+                </div>
+                <div>
+                  <Label className="text-xs text-stone-700">Link Sumber</Label>
+                  <Input
+                    data-testid={KB.uploadSumberLink}
+                    value={uploadMeta.sumber_link}
+                    onChange={(e) => setUploadMeta({ ...uploadMeta, sumber_link: e.target.value })}
+                    placeholder="https://..."
+                    className="mt-1 text-xs h-9 bg-white"
+                  />
+                </div>
               </div>
             </div>
 
-            <div>
-              <Label className="text-xs text-stone-700">Nama Sumber (opsional)</Label>
-              <Input
-                data-testid={KB.uploadSumberNama}
-                value={uploadMeta.sumber_nama}
-                onChange={(e) => setUploadMeta({ ...uploadMeta, sumber_nama: e.target.value })}
-                placeholder="Kosongkan agar memakai nama file otomatis"
-                className="mt-1 text-xs h-9"
-              />
-            </div>
+            {/* Multi-file Dropzone */}
+            <label
+              htmlFor="kb-file-input"
+              className="block flex flex-col items-center justify-center gap-1.5 p-6 rounded-xl border-2 border-dashed border-stone-300 hover:border-emerald-600 hover:bg-emerald-50/30 cursor-pointer transition-all"
+            >
+              <FileUp className="w-7 h-7 text-emerald-700" />
+              <div className="text-xs font-semibold text-stone-800">
+                Klik untuk pilih banyak file PDF / DOCX sekaligus
+              </div>
+              <div className="text-[11px] text-stone-500">
+                Mendukung multi-select • Ukuran ideal per file: &lt; 10 MB
+              </div>
+            </label>
+            <input
+              id="kb-file-input"
+              type="file"
+              multiple
+              accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+              data-testid={KB.uploadFileInput}
+              onChange={(e) => { handleFilesSelected(e.target.files); e.target.value = ''; }}
+              className="hidden"
+            />
 
-            <div>
-              <Label className="text-xs text-stone-700">Link Sumber (opsional)</Label>
-              <Input
-                data-testid={KB.uploadSumberLink}
-                value={uploadMeta.sumber_link}
-                onChange={(e) => setUploadMeta({ ...uploadMeta, sumber_link: e.target.value })}
-                placeholder="https://ojk.go.id/..."
-                className="mt-1 text-xs h-9"
-              />
-            </div>
-
-            {uploadResult && (
-              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 space-y-1.5">
-                <div className="flex items-center gap-1.5 font-bold">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-700" />
-                  Ekstraksi Berhasil
-                </div>
-                <div className="grid grid-cols-2 gap-2 text-[11px]">
-                  <div><strong>File:</strong> {uploadResult.filename}</div>
-                  <div><strong>Format:</strong> {uploadResult.file_type?.toUpperCase()}</div>
-                  <div><strong>Chunk dibuat:</strong> {uploadResult.chunks_created}</div>
-                  <div><strong>Total karakter:</strong> {uploadResult.total_chars?.toLocaleString('id-ID')}</div>
-                </div>
-                {uploadResult.preview_first_chunk && (
-                  <div className="pt-1.5 mt-1.5 border-t border-emerald-200">
-                    <div className="text-[10px] font-semibold uppercase text-emerald-700 mb-0.5">Preview chunk pertama:</div>
-                    <div className="text-[11px] text-emerald-900/90 italic leading-snug">
-                      "{uploadResult.preview_first_chunk}"
-                    </div>
+            {/* Queue List */}
+            {uploadQueue.length > 0 && (
+              <div className="rounded-xl border border-stone-200 overflow-hidden bg-white">
+                <div className="px-3 py-2 border-b border-stone-100 flex items-center justify-between bg-stone-50">
+                  <div className="text-xs font-bold text-stone-800">
+                    Antrian Ingest ({uploadQueue.length} file)
                   </div>
-                )}
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={clearFinished}
+                      disabled={isBulkRunning}
+                      className="h-7 text-[11px] text-stone-500 hover:text-stone-800"
+                    >
+                      Bersihkan yang sukses
+                    </Button>
+                    <span className="text-[11px] text-emerald-800 font-semibold">
+                      ✓ {uploadQueue.filter(x => x.status === 'success').length}
+                    </span>
+                    <span className="text-[11px] text-red-700 font-semibold">
+                      ✗ {uploadQueue.filter(x => x.status === 'failed').length}
+                    </span>
+                  </div>
+                </div>
+                <ul className="divide-y divide-stone-100 max-h-64 overflow-y-auto">
+                  {uploadQueue.map((item) => (
+                    <li key={item.id} className="p-2.5 space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                          <FileText className="w-3.5 h-3.5 text-stone-500 shrink-0" />
+                          <div className="min-w-0 flex-1">
+                            <div className="text-[11px] font-semibold text-stone-900 truncate">
+                              {item.file.name}
+                            </div>
+                            <div className="text-[10px] text-stone-500">
+                              {(item.file.size / 1024).toFixed(1)} KB
+                              {item.result && <> • {item.result.chunks_created} chunk • {item.result.vectors_indexed} vektor</>}
+                              {item.error && <> • <span className="text-red-700">{item.error}</span></>}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {item.status === 'queued' && (
+                            <span className="text-[10px] font-bold text-stone-500 uppercase bg-stone-100 px-2 py-0.5 rounded">
+                              Antri
+                            </span>
+                          )}
+                          {item.status === 'uploading' && (
+                            <span className="text-[10px] font-bold text-blue-700 uppercase bg-blue-50 border border-blue-200 px-2 py-0.5 rounded flex items-center gap-1">
+                              <Loader2 className="w-2.5 h-2.5 animate-spin" /> Upload
+                            </span>
+                          )}
+                          {item.status === 'success' && (
+                            <span className="text-[10px] font-bold text-emerald-800 uppercase bg-emerald-100 border border-emerald-200 px-2 py-0.5 rounded flex items-center gap-1">
+                              <CheckCircle2 className="w-2.5 h-2.5" /> Sukses
+                            </span>
+                          )}
+                          {item.status === 'failed' && (
+                            <>
+                              <span className="text-[10px] font-bold text-red-700 uppercase bg-red-50 border border-red-200 px-2 py-0.5 rounded">
+                                Gagal
+                              </span>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => retryOne(item.id)}
+                                disabled={isBulkRunning}
+                                className="h-6 text-[10px] px-2 border-stone-300 hover:bg-amber-50"
+                              >
+                                Retry
+                              </Button>
+                            </>
+                          )}
+                          {(item.status === 'queued' || item.status === 'failed') && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => removeFromQueue(item.id)}
+                              disabled={isBulkRunning}
+                              className="h-6 w-6 p-0 text-stone-400 hover:text-red-700"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                      {(item.status === 'uploading' || (item.status === 'success' && item.progress > 0)) && (
+                        <div className="w-full h-1.5 bg-stone-100 rounded-full overflow-hidden">
+                          <div
+                            className={`h-full transition-all duration-300 ${
+                              item.status === 'success' ? 'bg-emerald-500' : 'bg-blue-500'
+                            }`}
+                            style={{ width: `${item.progress}%` }}
+                          />
+                        </div>
+                      )}
+                    </li>
+                  ))}
+                </ul>
               </div>
             )}
 
@@ -583,24 +718,26 @@ const KnowledgeBaseManager = ({ api }) => {
                 type="button"
                 variant="outline"
                 onClick={() => { setUploadOpen(false); resetUploadForm(); }}
+                disabled={isBulkRunning}
                 className="flex-1 text-xs h-10 border-stone-300"
               >
                 Tutup
               </Button>
               <Button
-                type="submit"
+                type="button"
                 data-testid={KB.uploadSubmitBtn}
-                disabled={isUploading || !selectedFile}
+                onClick={startBulkUpload}
+                disabled={isBulkRunning || uploadQueue.filter(x => x.status === 'queued' || x.status === 'failed').length === 0}
                 className="flex-1 bg-emerald-800 hover:bg-emerald-900 text-white text-xs h-10 font-semibold shadow-sm"
               >
-                {isUploading ? (
-                  <><Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> Mengekstrak...</>
+                {isBulkRunning ? (
+                  <><Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> Sedang mengingest…</>
                 ) : (
-                  <><Upload className="w-4 h-4 mr-1.5" /> Ekstrak & Simpan Chunk</>
+                  <><Upload className="w-4 h-4 mr-1.5" /> Mulai Ingest ({uploadQueue.filter(x => x.status === 'queued' || x.status === 'failed').length})</>
                 )}
               </Button>
             </div>
-          </form>
+          </div>
         </DialogContent>
       </Dialog>
 
