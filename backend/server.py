@@ -35,6 +35,8 @@ try:
         delete_doc as rag_delete,
         clear_collection as rag_clear,
         search as rag_search,
+        hybrid_search as rag_hybrid_search,
+        chunk_quality_report as rag_chunk_quality,
         is_ready as rag_is_ready,
         status as rag_status,
         count_points as rag_count,
@@ -141,6 +143,8 @@ class DocumentChecklist(BaseModel):
     sppt_pbb_atau_surat_lahan: bool = False
     buku_tabungan: bool = False
     foto_lahan: bool = False
+    bpjs_ketenagakerjaan: bool = False  # required for KUR Kecil (> 100 jt)
+    agunan_tambahan: bool = False  # SHM/BPKB required for KUR Kecil
 
 class FarmerProfile(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -154,7 +158,7 @@ class FarmerProfile(BaseModel):
     provinsi: str
     komoditas: str
     luas_lahan_ha: float
-    status_lahan: str # "Milik Sendiri", "Sewa", "Garapan / Adat"
+    status_lahan: str
     lama_bertani_tahun: int
     estimasi_pendapatan_musim_rp: int
     riwayat_panen: List[HarvestRecord]
@@ -162,19 +166,62 @@ class FarmerProfile(BaseModel):
     pretest_completed: bool = False
     pretest_score: int = 0
     recommended_level: str = "Dasar"
+    # Human supervisor judgment
+    judgment_status: str = "pending"  # pending | approved | rejected
+    judgment_note: Optional[str] = ""
+    judged_at: Optional[str] = None
+    judged_by: Optional[str] = None
+    webinar_invited: bool = False
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 class CreditScoreBreakdown(BaseModel):
-    luas_lahan_poin: float # max 25
-    riwayat_panen_poin: float # max 25
-    edukasi_poin: float # max 25
-    dokumen_poin: float # max 25
-    total_score: float # max 100
-    kategori: str # "Layak Direkomendasikan", "Perlu Pendampingan Lanjutan", "Belum Layak — Edukasi Dulu"
-    badge_color: str # "green", "amber", "red"
+    luas_lahan_poin: float
+    riwayat_panen_poin: float
+    edukasi_poin: float
+    dokumen_poin: float
+    total_score: float
+    kategori: str
+    badge_color: str
     rekomendasi_plafon: str
     rekomendasi_tindak_lanjut: List[str]
     auditable_factors: List[str]
+    kur_tier: str = "KUR Mikro"  # "KUR Super Mikro" | "KUR Mikro" | "KUR Kecil"
+    needs_one_on_one: bool = False  # True when KUR Kecil (> 100 jt)
+    kur_kecil_gaps: List[str] = []  # missing BPJS TK / agunan for KUR Kecil
+
+class JudgmentRequest(BaseModel):
+    decision: str  # "approved" | "rejected" | "pending"
+    note: Optional[str] = ""
+    judged_by: Optional[str] = "Supervisor Admin"
+
+class WebinarEvent(BaseModel):
+    id: Optional[str] = None
+    judul: str
+    deskripsi: str
+    tanggal: str  # ISO datetime
+    durasi_menit: int = 90
+    lokasi: str = "Online — Zoom Meeting"
+    link_daftar: Optional[str] = ""
+    pembicara: List[Dict[str, str]] = []  # [{nama, jabatan, institusi}]
+    invited_user_ids: List[str] = []
+    status: str = "upcoming"  # upcoming | completed | cancelled
+    created_at: Optional[str] = None
+
+class BankProduct(BaseModel):
+    id: Optional[str] = None
+    bank_nama: str
+    bank_logo_url: Optional[str] = ""
+    nama_produk: str
+    tier: str = "KUR Mikro"  # KUR Super Mikro / KUR Mikro / KUR Kecil
+    bunga_efektif_tahun: float = 6.0
+    plafon_min_rp: int = 0
+    plafon_max_rp: int = 100_000_000
+    tenor_bulan_max: int = 36
+    highlight: Optional[str] = ""  # "Yarnen tersedia", "Tanpa agunan sd 100 jt"
+    link: Optional[str] = ""
+    kontak_mantri: Optional[str] = ""
+    active: bool = True
+    created_at: Optional[str] = None
 
 class KurDocument(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -315,6 +362,29 @@ def calculate_farmer_credit_score(profile: dict, completed_modules_count: int, a
         rekomendasi.append("Dampingi pembuatan pembukuan usaha tani sederhana bersama Penyuluh (PPL)")
         rekomendasi.append("Urus kelengkapan data kependudukan dan surat keterangan garapan dari desa")
 
+    # KUR tier detection: KUR Kecil requires higher qualification + BPJS TK + agunan tambahan
+    # Triggers KUR Kecil when: skor >= 80 AND luas >= 2 Ha AND omzet >= 20jt/musim
+    kur_tier = "KUR Mikro"
+    needs_one_on_one = False
+    kur_kecil_gaps: List[str] = []
+    if total >= 80.0 and luas >= 2.0 and pendapatan >= 20_000_000:
+        kur_tier = "KUR Kecil"
+        needs_one_on_one = True
+        rekomendasi_plafon = "KUR Kecil Rp 101.000.000 - Rp 500.000.000 (Bunga 6% p.a., wajib agunan tambahan)"
+        rekomendasi.insert(0, "🎯 Kandidat KUR Kecil (> Rp 100 Juta) — layak konsultasi 1-on-1 dengan Kepala Unit/Cabang Bank")
+        if not docs.get("bpjs_ketenagakerjaan"):
+            kur_kecil_gaps.append("BPJS Ketenagakerjaan aktif (wajib untuk KUR Kecil)")
+            rekomendasi.append("Daftarkan BPJS Ketenagakerjaan (BPJS TK) — syarat wajib KUR Kecil > Rp 100 Juta")
+        if not docs.get("agunan_tambahan"):
+            kur_kecil_gaps.append("Agunan tambahan (SHM / BPKB kendaraan)")
+            rekomendasi.append("Siapkan agunan tambahan berupa Sertifikat Hak Milik (SHM) atau BPKB kendaraan")
+    elif total >= 40.0 and total < 70.0:
+        kur_tier = "KUR Super Mikro"
+    elif total < 40.0:
+        kur_tier = "Belum Direkomendasikan"
+
+    auditable.append(f"Tier akhir: {kur_tier}" + (" • butuh konsultasi 1-on-1" if needs_one_on_one else ""))
+
     return CreditScoreBreakdown(
         luas_lahan_poin=lahan_pts,
         riwayat_panen_poin=panen_pts,
@@ -325,7 +395,10 @@ def calculate_farmer_credit_score(profile: dict, completed_modules_count: int, a
         badge_color=badge_color,
         rekomendasi_plafon=rekomendasi_plafon,
         rekomendasi_tindak_lanjut=rekomendasi,
-        auditable_factors=auditable
+        auditable_factors=auditable,
+        kur_tier=kur_tier,
+        needs_one_on_one=needs_one_on_one,
+        kur_kecil_gaps=kur_kecil_gaps,
     )
 
 
@@ -333,18 +406,18 @@ def calculate_farmer_credit_score(profile: dict, completed_modules_count: int, a
 # RAG RETRIEVAL ENGINE
 # ----------------------------------------------------
 async def retrieve_relevant_kur_docs(query: str, top_k: int = 3) -> List[dict]:
-    # 1) Try Qdrant semantic search first
+    # 1) Hybrid search (BM25 + dense) preferred
     if HAS_RAG and rag_is_ready():
         try:
-            hits = rag_search(query, top_k=top_k)
+            corpus = await db.kur_documents.find({}, {"_id": 0}).to_list(500)
+            hits = rag_hybrid_search(query, corpus, top_k=top_k)
             if hits:
-                # Normalize: strip internal fields
                 cleaned = []
                 for h in hits:
                     cleaned.append({k: v for k, v in h.items() if not k.startswith("_")})
                 return cleaned
         except Exception as e:
-            logging.warning(f"Qdrant retrieval failed, falling back to keyword: {e}")
+            logging.warning(f"Hybrid search failed, falling back to keyword: {e}")
 
     # 2) Fallback: keyword-weighted retrieval over mongo
     docs = await db.kur_documents.find({}, {"_id": 0}).to_list(200)
@@ -807,6 +880,14 @@ async def upload_kur_doc_file(
     if HAS_RAG and inserted:
         indexed = rag_upsert(inserted)
 
+    # Chunk quality (cosine similarity between adjacent chunks)
+    quality_report = []
+    if HAS_RAG and len(chunks) >= 2:
+        try:
+            quality_report = rag_chunk_quality(chunks)
+        except Exception:
+            pass
+
     return {
         "success": True,
         "filename": filename,
@@ -816,6 +897,7 @@ async def upload_kur_doc_file(
         "used_semantic_chunker": HAS_RAG,
         "total_chars": sum(len(e["isi_teks"]) for e in inserted),
         "doc_ids": [e["id"] for e in inserted],
+        "chunk_quality": quality_report,
         "preview_first_chunk": inserted[0]["isi_teks"][:250] + ("..." if len(inserted[0]["isi_teks"]) > 250 else "") if inserted else "",
     }
 
@@ -1025,6 +1107,107 @@ async def get_crm_analytics():
         "category_counts": category_counts,
         "distribution_chart": distribution_chart
     }
+
+
+# ----------------------------------------------------
+# SUPERVISOR JUDGMENT ENDPOINTS
+# ----------------------------------------------------
+@api_router.patch("/crm/farmers/{user_id}/judgment")
+async def submit_judgment(user_id: str, req: JudgmentRequest):
+    if req.decision not in {"approved", "rejected", "pending"}:
+        raise HTTPException(status_code=400, detail="Decision harus approved/rejected/pending")
+    now = datetime.now(timezone.utc).isoformat()
+    update = {
+        "judgment_status": req.decision,
+        "judgment_note": req.note or "",
+        "judged_at": now,
+        "judged_by": req.judged_by or "Supervisor Admin",
+    }
+    result = await db.farmer_profiles.update_one(
+        {"user_id": user_id}, {"$set": update}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Petani tidak ditemukan")
+
+    # Auto-invite to next upcoming webinar when approved
+    invited_to = None
+    if req.decision == "approved":
+        upcoming = await db.webinar_events.find_one(
+            {"status": "upcoming"}, sort=[("tanggal", 1)]
+        )
+        if upcoming:
+            await db.webinar_events.update_one(
+                {"id": upcoming["id"]},
+                {"$addToSet": {"invited_user_ids": user_id}},
+            )
+            await db.farmer_profiles.update_one(
+                {"user_id": user_id}, {"$set": {"webinar_invited": True}}
+            )
+            invited_to = upcoming["id"]
+
+    return {"success": True, "decision": req.decision, "invited_to_webinar": invited_to}
+
+
+# ----------------------------------------------------
+# WEBINAR MANAGEMENT
+# ----------------------------------------------------
+@api_router.get("/webinars")
+async def list_webinars():
+    events = await db.webinar_events.find({}, {"_id": 0}).sort("tanggal", 1).to_list(100)
+    # enrich with invited farmer names
+    for ev in events:
+        ids = ev.get("invited_user_ids") or []
+        if ids:
+            farmers = await db.farmer_profiles.find(
+                {"user_id": {"$in": ids}}, {"_id": 0, "user_id": 1, "nama": 1, "desa": 1, "komoditas": 1}
+            ).to_list(200)
+            ev["invited_farmers"] = farmers
+        else:
+            ev["invited_farmers"] = []
+    return events
+
+
+@api_router.post("/webinars")
+async def create_webinar(payload: WebinarEvent):
+    new_id = payload.id or f"wb-{uuid.uuid4().hex[:8]}"
+    doc = payload.model_dump()
+    doc["id"] = new_id
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    doc["invited_user_ids"] = doc.get("invited_user_ids") or []
+    await db.webinar_events.insert_one(doc.copy())
+    return {"success": True, "webinar": doc}
+
+
+@api_router.delete("/webinars/{webinar_id}")
+async def delete_webinar(webinar_id: str):
+    r = await db.webinar_events.delete_one({"id": webinar_id})
+    return {"success": r.deleted_count > 0}
+
+
+# ----------------------------------------------------
+# BANK PRODUCTS (win-win promo)
+# ----------------------------------------------------
+@api_router.get("/bank-products")
+async def list_bank_products():
+    items = await db.bank_products.find({}, {"_id": 0}).sort("plafon_max_rp", -1).to_list(100)
+    return items
+
+
+@api_router.post("/bank-products")
+async def create_bank_product(payload: BankProduct):
+    new_id = payload.id or f"bp-{uuid.uuid4().hex[:8]}"
+    doc = payload.model_dump()
+    doc["id"] = new_id
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    await db.bank_products.insert_one(doc.copy())
+    return {"success": True, "product": doc}
+
+
+@api_router.delete("/bank-products/{product_id}")
+async def delete_bank_product(product_id: str):
+    r = await db.bank_products.delete_one({"id": product_id})
+    return {"success": r.deleted_count > 0}
+
 
 
 # ----------------------------------------------------
@@ -1660,6 +1843,117 @@ async def seed_all_data():
     ]
     await db.learning_progress.insert_many(demo_progress)
     logger.info("ModalTani seeding completed successfully.")
+
+    # Seed Webinar Events
+    await db.webinar_events.delete_many({})
+    now_iso = datetime.now(timezone.utc).isoformat()
+    webinars = [
+        {
+            "id": "wb-pemantapan-01",
+            "judul": "Pemantapan Pengajuan KUR Pertanian Musim Tanam 2026",
+            "deskripsi": "Sesi tanya-jawab langsung dengan analis Bank Himbara & narasumber Kementerian. Peserta akan dipandu simulasi berkas hingga siap datang ke unit bank.",
+            "tanggal": "2026-03-15T09:00:00+07:00",
+            "durasi_menit": 120,
+            "lokasi": "Zoom Meeting (Link dikirim ke WhatsApp peserta)",
+            "link_daftar": "https://modaltani.id/webinar/pemantapan-kur-mar2026",
+            "pembicara": [
+                {"nama": "Ir. Retno Wulandari", "jabatan": "Kepala Sub-Direktorat Pembiayaan Petani", "institusi": "Kementerian Pertanian RI"},
+                {"nama": "Dr. Bambang Susanto", "jabatan": "Deputi Direktur Kredit Program", "institusi": "OJK"},
+                {"nama": "Rina Kartika, S.E., M.M.", "jabatan": "Regional Head Mikro Banking", "institusi": "Bank BRI"},
+                {"nama": "Ahmad Fauzi", "jabatan": "Kepala Unit KUR Pertanian", "institusi": "Bank Mandiri"},
+            ],
+            "invited_user_ids": ["user-budi", "user-wayan"],
+            "status": "upcoming",
+            "created_at": now_iso,
+        },
+        {
+            "id": "wb-konsultasi-1on1",
+            "judul": "Konsultasi 1-on-1 KUR Kecil (> Rp 100 Juta)",
+            "deskripsi": "Sesi eksklusif untuk calon debitur KUR Kecil dengan Kepala Cabang. Wajib membawa BPJS Ketenagakerjaan dan bukti agunan tambahan.",
+            "tanggal": "2026-04-05T13:00:00+07:00",
+            "durasi_menit": 60,
+            "lokasi": "Hybrid (Kantor Cabang / Zoom Room)",
+            "link_daftar": "https://modaltani.id/webinar/kur-kecil-apr2026",
+            "pembicara": [
+                {"nama": "Ir. Djoko Prasetyo", "jabatan": "Kepala Cabang Utama", "institusi": "Bank BNI"},
+                {"nama": "Sri Handayani, S.E.", "jabatan": "Direktur Kredit Retail", "institusi": "Bank BSI"},
+            ],
+            "invited_user_ids": [],
+            "status": "upcoming",
+            "created_at": now_iso,
+        },
+    ]
+    await db.webinar_events.insert_many(webinars)
+
+    # Seed Bank Products
+    await db.bank_products.delete_many({})
+    bank_products = [
+        {
+            "id": "bp-bri-mikro",
+            "bank_nama": "Bank BRI",
+            "bank_logo_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/2e/BANK_BRI_logo.svg/512px-BANK_BRI_logo.svg.png",
+            "nama_produk": "KUR Mikro BRI Pertanian",
+            "tier": "KUR Mikro",
+            "bunga_efektif_tahun": 6.0,
+            "plafon_min_rp": 10_000_000,
+            "plafon_max_rp": 100_000_000,
+            "tenor_bulan_max": 36,
+            "highlight": "Tanpa agunan tambahan, mantri datang ke sawah, skema Yarnen tersedia",
+            "link": "https://bri.co.id/kur",
+            "kontak_mantri": "1500-017",
+            "active": True,
+            "created_at": now_iso,
+        },
+        {
+            "id": "bp-mandiri-super",
+            "bank_nama": "Bank Mandiri",
+            "bank_logo_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/a/ad/Bank_Mandiri_logo_2016.svg/512px-Bank_Mandiri_logo_2016.svg.png",
+            "nama_produk": "KUR Super Mikro Mandiri Tani",
+            "tier": "KUR Super Mikro",
+            "bunga_efektif_tahun": 3.0,
+            "plafon_min_rp": 1_000_000,
+            "plafon_max_rp": 10_000_000,
+            "tenor_bulan_max": 24,
+            "highlight": "Cocok untuk petani pemula, cair 3 hari kerja",
+            "link": "https://bankmandiri.co.id/kur",
+            "kontak_mantri": "14000",
+            "active": True,
+            "created_at": now_iso,
+        },
+        {
+            "id": "bp-bni-kecil",
+            "bank_nama": "Bank BNI",
+            "bank_logo_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/5/55/BNI_logo.svg/512px-BNI_logo.svg.png",
+            "nama_produk": "KUR Kecil BNI Agri Prima",
+            "tier": "KUR Kecil",
+            "bunga_efektif_tahun": 6.0,
+            "plafon_min_rp": 101_000_000,
+            "plafon_max_rp": 500_000_000,
+            "tenor_bulan_max": 60,
+            "highlight": "Untuk agrobisnis berkembang. Wajib BPJS TK & agunan SHM/BPKB. Konsultasi 1-on-1 dengan Kepala Cabang",
+            "link": "https://bni.co.id/id-id/beranda/produk/mikro/kur-kecil",
+            "kontak_mantri": "1500046",
+            "active": True,
+            "created_at": now_iso,
+        },
+        {
+            "id": "bp-bsi-syariah",
+            "bank_nama": "Bank BSI",
+            "bank_logo_url": "https://upload.wikimedia.org/wikipedia/id/thumb/e/e4/Bank_Syariah_Indonesia.svg/512px-Bank_Syariah_Indonesia.svg.png",
+            "nama_produk": "KUR Mikro iB Hasanah",
+            "tier": "KUR Mikro",
+            "bunga_efektif_tahun": 6.0,
+            "plafon_min_rp": 5_000_000,
+            "plafon_max_rp": 100_000_000,
+            "tenor_bulan_max": 36,
+            "highlight": "Akad Murabahah (jual-beli) — sesuai prinsip syariah, cocok untuk petani muslim",
+            "link": "https://bankbsi.co.id/produk-layanan/produk/pembiayaan-kur",
+            "kontak_mantri": "14040",
+            "active": True,
+            "created_at": now_iso,
+        },
+    ]
+    await db.bank_products.insert_many(bank_products)
 
     # Sync knowledge base into Qdrant vector store
     if HAS_RAG:

@@ -60,7 +60,7 @@ export const LandingView = ({ onSelectRole, onGoToModules, onGoToChat, onGoToCrm
                   className="bg-white hover:bg-amber-50 text-stone-800 hover:text-amber-900 border-stone-300 hover:border-amber-400 font-heading font-semibold text-sm sm:text-base h-12 sm:h-14 px-6 sm:px-8 rounded-xl shadow-xs"
                 >
                   <Building2 className="w-5 h-5 mr-2 text-amber-600" />
-                  Masuk sebagai Admin Bank Mitra
+                  Masuk sebagai Supervisor Admin
                 </Button>
               </div>
               {/* Key Trust Signals */}

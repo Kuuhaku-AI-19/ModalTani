@@ -106,7 +106,7 @@ export const Navbar = ({
             }`}
           >
             <Building2 className="w-4 h-4 text-amber-600" />
-            Dashboard Bank Mitra
+            Supervisor Review Panel
           </button>
         </nav>
 
@@ -225,7 +225,7 @@ export const Navbar = ({
           className={`flex items-center gap-1 px-3 py-1 text-xs font-medium rounded-lg whitespace-nowrap ${activeTab === 'crm' ? 'bg-amber-100 text-amber-900 font-bold' : 'text-stone-600'}`}
         >
           <Building2 className="w-3.5 h-3.5 text-amber-700" />
-          Bank CRM
+          Supervisor
         </button>
       </div>
     </header>

@@ -13,17 +13,30 @@ import {
   MapPin, 
   FileCheck,
   ArrowRight,
-  Sparkles
+  Sparkles,
+  CheckCircle2,
+  XCircle,
+  Users2,
+  AlertTriangle,
+  Building2,
 } from 'lucide-react';
 
 export const FarmerDetailDrawer = ({ 
   isOpen, 
   onClose, 
   farmer, 
-  onUpdateDocuments 
+  onUpdateDocuments,
+  onSubmitJudgment,
 }) => {
   const [docState, setDocState] = useState(farmer?.dokumen || {});
   const [savingDoc, setSavingDoc] = useState(false);
+  const [judgeNote, setJudgeNote] = useState('');
+  const [judging, setJudging] = useState(false);
+
+  React.useEffect(() => {
+    setDocState(farmer?.dokumen || {});
+    setJudgeNote(farmer?.judgment_note || '');
+  }, [farmer]);
 
   if (!farmer) return null;
 
@@ -49,17 +62,51 @@ export const FarmerDetailDrawer = ({
     }
   };
 
+  const handleJudge = async (decision) => {
+    if (!onSubmitJudgment) return;
+    setJudging(true);
+    try {
+      await onSubmitJudgment(farmer.user_id, decision, judgeNote);
+    } finally {
+      setJudging(false);
+    }
+  };
+
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="max-w-2xl bg-white p-4 sm:p-6 rounded-2xl border border-stone-200 shadow-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader className="text-left space-y-1">
           <div className="flex items-center justify-between flex-wrap gap-2">
-            <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
-              badgeColor === 'green' ? 'bg-emerald-100 text-emerald-800' :
-              badgeColor === 'amber' ? 'bg-amber-100 text-amber-800' : 'bg-red-100 text-red-800'
-            }`}>
-              {cs.kategori || 'Skor Calon Debitur'}
-            </span>
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                badgeColor === 'green' ? 'bg-emerald-100 text-emerald-800' :
+                badgeColor === 'amber' ? 'bg-amber-100 text-amber-800' : 'bg-red-100 text-red-800'
+              }`}>
+                {cs.kategori || 'Skor Calon Debitur'}
+              </span>
+              {cs.needs_one_on_one && (
+                <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-purple-100 text-purple-900 border border-purple-200 flex items-center gap-1">
+                  <Users2 className="w-3 h-3" />
+                  Butuh Konsultasi 1-on-1
+                </span>
+              )}
+              {cs.kur_tier && (
+                <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-stone-100 text-stone-800 border border-stone-200">
+                  {cs.kur_tier}
+                </span>
+              )}
+              {farmer.judgment_status === 'approved' && (
+                <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-700 text-white flex items-center gap-1">
+                  <CheckCircle2 className="w-3 h-3" /> Approved Supervisor
+                </span>
+              )}
+              {farmer.judgment_status === 'rejected' && (
+                <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-red-700 text-white flex items-center gap-1">
+                  <XCircle className="w-3 h-3" /> Rejected Supervisor
+                </span>
+              )}
+            </div>
             <span className="text-xs text-stone-400 font-mono">
               NIK: {farmer.nik || '3201************'}
             </span>
@@ -181,7 +228,9 @@ export const FarmerDetailDrawer = ({
               { key: 'nib_atau_sku', label: 'Surat Keterangan Usaha (SKU) Desa / NIB' },
               { key: 'sppt_pbb_atau_surat_lahan', label: 'SPPT PBB / Surat Garap' },
               { key: 'buku_tabungan', label: 'Buku Tabungan Bank' },
-              { key: 'foto_lahan', label: 'Foto Geotag Lahan' }
+              { key: 'foto_lahan', label: 'Foto Geotag Lahan' },
+              { key: 'bpjs_ketenagakerjaan', label: 'BPJS Ketenagakerjaan (wajib KUR Kecil)' },
+              { key: 'agunan_tambahan', label: 'Agunan Tambahan SHM/BPKB (wajib KUR Kecil)' }
             ].map((d) => (
               <label
                 key={d.key}

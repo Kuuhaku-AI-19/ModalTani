@@ -123,6 +123,46 @@ def semantic_chunk(text: str, max_chunk: int = 1500) -> List[str]:
         return _naive_chunk(text)
 
 
+def _cosine(a, b) -> float:
+    import math as _m
+    dot = sum(x * y for x, y in zip(a, b))
+    na = _m.sqrt(sum(x * x for x in a))
+    nb = _m.sqrt(sum(y * y for y in b))
+    if na == 0 or nb == 0:
+        return 0.0
+    return dot / (na * nb)
+
+
+def chunk_quality_report(chunks: List[str]) -> List[dict]:
+    """For each adjacent pair, compute cosine similarity between chunk embeddings.
+
+    Lower similarity → semantic split found a real topic boundary (good).
+    Higher similarity → chunks are still on the same topic (SemanticChunker over-split).
+    """
+    if not _init_all() or len(chunks) < 2:
+        return []
+    try:
+        vectors = _embedder.embed_documents(chunks)
+        report = []
+        for i in range(len(chunks) - 1):
+            sim = round(_cosine(vectors[i], vectors[i + 1]), 3)
+            if sim < 0.55:
+                verdict = "topik berbeda ✓"
+            elif sim < 0.80:
+                verdict = "transisi lembut"
+            else:
+                verdict = "sangat mirip — mungkin bisa digabung ⚠"
+            report.append({
+                "pair": f"Chunk {i + 1} ↔ {i + 2}",
+                "similarity": sim,
+                "verdict": verdict,
+            })
+        return report
+    except Exception as e:
+        logger.warning(f"[RAG] chunk_quality_report failed: {e}")
+        return []
+
+
 def upsert_docs(docs: List[dict]) -> int:
     """Each doc must have `id` and `isi_teks`. Full doc is stored as payload."""
     if not docs or not _init_all():
@@ -211,3 +251,79 @@ def search(query: str, top_k: int = 3, min_score: float = 0.0) -> List[dict]:
     except Exception as e:
         logger.error(f"[RAG] search failed: {e}")
         return []
+
+
+def _tokenize_bm25(text: str) -> List[str]:
+    import re as _re
+    return _re.findall(r"\w+", (text or "").lower())
+
+
+def hybrid_search(query: str, corpus: List[dict], top_k: int = 3, rrf_k: int = 60) -> List[dict]:
+    """Reciprocal Rank Fusion of dense (Qdrant) + BM25 keyword search.
+
+    Args:
+        query: user query.
+        corpus: full docs list (list of dicts each with `id`, `isi_teks`, ...) — mongo mirror.
+        top_k: number of results to return.
+        rrf_k: RRF constant (typical 60).
+
+    Falls back gracefully when either engine fails.
+    """
+    if not query:
+        return []
+
+    dense_hits = []
+    dense_by_id = {}
+    if _init_all():
+        try:
+            hits = search(query, top_k=max(top_k * 3, 10))
+            for rank, h in enumerate(hits, start=1):
+                did = h.get("_doc_id") or h.get("id")
+                if not did:
+                    continue
+                dense_hits.append((did, rank, h))
+                dense_by_id[did] = h
+        except Exception as e:
+            logger.warning(f"[RAG] hybrid dense leg failed: {e}")
+
+    bm25_hits = []
+    try:
+        from rank_bm25 import BM25Okapi
+        tokenized = [_tokenize_bm25(f"{d.get('topik','')} {d.get('judul','')} {d.get('isi_teks','')}") for d in corpus]
+        if any(tokenized):
+            bm25 = BM25Okapi(tokenized)
+            scores = bm25.get_scores(_tokenize_bm25(query))
+            ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
+            for rank, (idx, sc) in enumerate(ranked[: max(top_k * 3, 10)], start=1):
+                if sc <= 0:
+                    continue
+                did = corpus[idx].get("id")
+                bm25_hits.append((did, rank, corpus[idx], sc))
+    except Exception as e:
+        logger.warning(f"[RAG] hybrid BM25 leg failed: {e}")
+
+    # RRF fusion
+    rrf_scores = {}
+    docs_by_id = {}
+    for did, rank, doc in dense_hits:
+        rrf_scores[did] = rrf_scores.get(did, 0.0) + 1.0 / (rrf_k + rank)
+        docs_by_id[did] = doc
+    for did, rank, doc, _bm in bm25_hits:
+        rrf_scores[did] = rrf_scores.get(did, 0.0) + 1.0 / (rrf_k + rank)
+        # prefer dense payload if present, else fall back to corpus doc
+        if did not in docs_by_id:
+            docs_by_id[did] = doc
+
+    if not rrf_scores:
+        return []
+
+    ordered = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+    out = []
+    for did, score in ordered:
+        d = docs_by_id.get(did, {})
+        d = {k: v for k, v in d.items() if not k.startswith("_")}
+        d["_rrf_score"] = round(score, 4)
+        d["_has_dense"] = did in dense_by_id
+        d["_has_bm25"] = any(x[0] == did for x in bm25_hits)
+        out.append(d)
+    return out
