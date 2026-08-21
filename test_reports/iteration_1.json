@@ -1,0 +1,50 @@
+{
+  "summary": "Iteration 1 end-to-end test of ModalTani. Backend: created pytest suite (/app/backend/tests/backend_test.py, 35 tests) covering users/demo-login, modules, pretest, learning-progress, kur-docs CRUD, RAG chat (+history), CRM farmers/analytics/detail/documents/create, and seed. 30/35 passed; all 5 failures are HTTP status-code semantics (errors returned as HTTP 200 with an {error} body). Frontend: Playwright covered landing -> farmer CTA -> modules -> module modal -> chat (RAG answer + source badge + quick prompts) and role switch -> CRM (KPIs, recharts chart, table, farmer drawer + document toggle/recalc, add farmer, Knowledge Base CRUD, reset demo). One CRITICAL frontend crash found in the module quiz submission (prop/arg mismatch), everything else worked.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/modules/{module_id}", "issue": "Unknown id returns HTTP 200 with {'error':'Modul tidak ditemukan'} instead of 404"},
+      {"endpoint": "GET /api/crm/farmers/{user_id}", "issue": "Unknown user returns HTTP 200 with {'error':...} instead of 404; frontend cannot distinguish success from error"},
+      {"endpoint": "PUT /api/crm/farmers/{user_id}/documents", "issue": "Returns success:true even when no farmer profile matches (update_one matched_count not checked) - silent no-op, should be 404"},
+      {"endpoint": "DELETE /api/kur-docs/{doc_id}", "issue": "Returns HTTP 200 {'success': false} for non-existent doc instead of 404"},
+      {"endpoint": "POST /api/chat/ask", "issue": "Empty/whitespace message returns HTTP 200 with {'error':'Pesan tidak boleh kosong'} instead of 400"}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "ModulePlayerModal / App.js", "issue": "CRITICAL: Submitting a module quiz throws 'TypeError: onCompleteQuiz is not a function' (uncaught runtime error overlay covers the app). App.js passes onQuizComplete={handleModuleQuizSubmit} but the modal expects prop onCompleteQuiz, and no userId prop is passed. Additionally the argument order mismatches: modal calls onCompleteQuiz(userId, module.id, score, answers) while handleModuleQuizSubmit(moduleId, score) expects (moduleId, score). Result: POST /api/learning-progress/update is NEVER called, so module completion/credit-score uplift never persists.", "selector": "[data-testid=\"quiz-submit-btn\"]", "priority": "CRITICAL"},
+      {"component": "KnowledgeBaseManager (CRMDashboardView)", "issue": "Delete uses native window.confirm() instead of a shadcn AlertDialog - inconsistent with the rest of the UI and breaks automated flows that auto-dismiss dialogs. Delete itself works when the confirm is accepted (DELETE /api/kur-docs/{id} + list refresh verified).", "selector": "[data-testid^=\"kb-doc-delete-\"]", "priority": "LOW"},
+      {"component": "AddFarmerModal / FarmerDetailDrawer", "issue": "Form inputs and submit/save buttons had no data-testid. Added add-farmer-nama, add-farmer-no-hp, add-farmer-luas-lahan, add-farmer-submit-btn, crm-save-doc-verification-btn (not yet registered in constants/testIds/modaltani.js - please add them there).", "selector": "n/a", "priority": "LOW"}
+    ],
+    "integration_issues": [
+      {"flow": "Module quiz completion -> learning progress -> credit score", "issue": "Broken by the prop/arg mismatch above; no API call is fired and no toast/progress refresh occurs.", "affected_selectors": ["[data-testid=\"quiz-submit-btn\"]"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Fix ModulePlayerModal wiring in App.js: pass onCompleteQuiz={...} and userId={currentUser?.id}, and align the callback signature with (userId, moduleId, score, answers). Verify POST /api/learning-progress/update fires and the CRM score increases.",
+    "Return proper HTTP status codes (404/400) instead of 200-with-error-body for: GET /api/modules/{id}, GET /api/crm/farmers/{id}, PUT /api/crm/farmers/{id}/documents (check matched_count), DELETE /api/kur-docs/{id}, POST /api/chat/ask (empty message).",
+    "Replace window.confirm in KnowledgeBaseManager delete with an AlertDialog.",
+    "Register the newly added data-testids in /app/frontend/src/constants/testIds/modaltani.js."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 1471 lines with seed data, RAG engine, scoring engine and routes in one module - split into routers/ + services/ + seed_data.py.",
+    "GET /api/crm/farmers and /api/crm/analytics issue one learning_progress query per farmer (N+1). Use a single aggregate/$in query; will not scale beyond demo size.",
+    "Credit-score computation is duplicated in /crm/farmers, /crm/farmers/{id} and /crm/analytics - extract one enrichment helper.",
+    "Deprecated FastAPI @app.on_event startup/shutdown - migrate to lifespan handlers.",
+    "generate_rag_answer swallows all Gemini exceptions into a static fallback with only a WARNING; consider surfacing a 'fallback' flag in the response so the UI can show degraded mode."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py",
+    "/app/frontend/src/components/AddFarmerModal.jsx",
+    "/app/frontend/src/components/FarmerDetailDrawer.jsx"
+  ],
+  "success_rate": {"backend": "86% (30/35)", "frontend": "92% (12/13 flows; quiz submit broken)"},
+  "seed_data_creation": "Used built-in POST /api/seed. Test artifacts (TEST_ prefixed farmers/docs/progress) were cleaned up or wiped by the final seed reset.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "test_credentials": "Passwordless demo mode; /app/memory/test_credentials.md lists 6 petani + Bambang Prakoso (admin_bank). Verified role selector switching works.",
+  "context_for_next_testing_agent": "Backend suite lives at /app/backend/tests/backend_test.py (pytest.ini enforces -n 2 --dist loadscope; TestSeedZLast resets the DB last). The 5 failing tests intentionally assert proper 404/400 codes - they should pass once the main agent fixes status codes. Verified working: landing CTAs, role selector auto-routing, chat RAG (Gemini live, badge 'Dijawab berdasarkan 3 dokumen resmi', quick prompts), CRM KPIs/chart/table, farmer drawer doc toggle + recalculation (+10 pts for NIB/SKU), add farmer, KB add/delete (accept the window.confirm dialog in Playwright), reset demo. Still to retest: module quiz submit -> progress persistence -> CRM score uplift.",
+  "rca_of_the_issue": "Module quiz crash RCA: App.js line ~346 renders <ModulePlayerModal ... onQuizComplete={handleModuleQuizSubmit} /> but ModulePlayerModal.jsx destructures ({isOpen, onClose, module, onCompleteQuiz, userId}); onCompleteQuiz is therefore undefined and handleEvaluateQuiz (line 54) throws TypeError. userId is also never passed, and the caller's argument order (userId, moduleId, score, answers) does not match handleModuleQuizSubmit(moduleId, score). Reproduce: open Modul Belajar -> module card -> 'Kuis Pemahaman' tab -> answer -> click quiz-submit-btn."
+}

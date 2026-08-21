@@ -1,0 +1,71 @@
+{
+  "typography": {
+    "heading_font": "Outfit",
+    "body_font": "Inter",
+    "mono_font": "JetBrains Mono"
+  },
+  "colors": {
+    "archetype": "ORGANIC & EARTHY",
+    "primary": "#166534",
+    "primary_hover": "#14532D",
+    "secondary": "#D97706",
+    "background": "#FDFBF7",
+    "surface": "#FFFFFF",
+    "surface_card": "#F9F6EE",
+    "text_main": "#1C1917",
+    "text_muted": "#57534E",
+    "border": "#E7E5E4",
+    "accent_green": "#22C55E",
+    "accent_amber": "#F59E0B"
+  },
+  "visual_enhancers": {
+    "border_radius": "0.75rem",
+    "box_shadow": "0 10px 25px -5px rgba(22, 101, 52, 0.08), 0 8px 10px -6px rgba(22, 101, 52, 0.08)",
+    "glass_effect": "backdrop-blur-xl bg-white/80 border border-stone-200/60"
+  },
+  "grids": {
+    "landing_bento": "grid grid-cols-1 md:grid-cols-12 gap-8",
+    "dashboard_grid": "grid grid-cols-1 md:grid-cols-4 gap-6"
+  },
+  "layouts": {
+    "max_width": "max-w-7xl mx-auto px-4 sm:px-6 lg:px-8",
+    "section_padding": "py-16 md:py-24"
+  },
+  "motion": {
+    "default_transition": "transition-all duration-300 ease-in-out",
+    "hover_lift": "hover:-translate-y-1 hover:shadow-xl"
+  },
+  "accessibility": {
+    "min_contrast_ratio": "4.5:1",
+    "focus_ring": "focus:ring-2 focus:ring-green-700 focus:outline-none"
+  },
+  "media": {
+    "hero_image": "https://images.unsplash.com/photo-1505471768190-275e2ad7b3f9?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzOTB8MHwxfHNlYXJjaHwzfHxpbmRvbmVzaWFuJTIwZmFybWVyJTIwcmljZSUyMGZpZWxkJTIwYWdyaWN1bHR1cmV8ZW58MHx8fHwxNzg3MjgzNDQ4fDA&ixlib=rb-4.1.0&q=85",
+    "farmer_image": "https://images.pexels.com/photos/35544010/pexels-photo-35544010.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+    "dashboard_preview": "https://images.unsplash.com/photo-1551288049-bebda4e38f71?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMzl8MHwxfHNlYXJjaHwyfHxtb2Rlcm4lMjBiYW5raW5nJTIwZGFzaGJvYXJkJTIwYW5hbHl0aWNzJTIwZmluYW5jZXxlbnwwfHx8fDE3ODcyODM0NDh8MA&ixlib=rb-4.1.0&q=85"
+  },
+  "image_urls": [
+    {
+      "category": "hero_banner",
+      "description": "Indonesian farmer in rice paddy field",
+      "url": "https://images.unsplash.com/photo-1505471768190-275e2ad7b3f9?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzOTB8MHwxfHNlYXJjaHwzfHxpbmRvbmVzaWFuJTIwZmFybWVyJTIwcmljZSUyMGZpZWxkJTIwYWdyaWN1bHR1cmV8ZW58MHx8fHwxNzg3MjgzNDQ4fDA&ixlib=rb-4.1.0&q=85"
+    },
+    {
+      "category": "farmer_story",
+      "description": "Jogja farmer planting rice",
+      "url": "https://images.pexels.com/photos/35544010/pexels-photo-35544010.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940"
+    },
+    {
+      "category": "bank_dashboard",
+      "description": "Modern banking analytics dashboard",
+      "url": "https://images.unsplash.com/photo-1551288049-bebda4e38f71?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMzl8MHwxfHNlYXJjaHwyfHxtb2Rlcm4lMjBiYW5raW5nJTIwZGFzaGJvYXJkJTIwYW5hbHl0aWNzJTIwZmluYW5jZXxlbnwwfHx8fDE3ODcyODM0NDh8MA&ixlib=rb-4.1.0&q=85"
+    }
+  ],
+  "instructions_to_main_agent": "Ensure all interactive elements have data-testid attributes. Implement the exact features requested in ModalTani prompt: Landing page, Role Switcher (Petani & Admin Bank), Pre-test Literacy, PLEK Kementan Audio-Visual Modules & Quizzes, RAG AI KUR Assistant with official document badge & voice simulation, and CRM Bank Dashboard with 4-pillar deterministic credit scoring, distribution charts, and auditable debtor details.",
+  "UNIVERSAL GUIDELINES FOR MAIN AGENT": {
+    "no_universal_transition": true,
+    "interactive_data_testid": true,
+    "no_transparent_header_without_blur": true,
+    "generous_spacing": true
+  }
+}
